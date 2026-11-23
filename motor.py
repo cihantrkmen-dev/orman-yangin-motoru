@@ -8,19 +8,16 @@ import numpy as np
 
 
 def _doymus_buhar_basinci_kpa(sicaklik_c: float) -> float:
-    """Magnus-Tetens formülü ile doymuş su buharı basıncı (kPa)."""
     return 0.61078 * math.exp((17.27 * sicaklik_c) / (sicaklik_c + 237.3))
 
 
 def _buhar_basinci_acigi_vpd(sicaklik_c: float, bagil_nem: float) -> float:
-    """Buhar Basıncı Açığı (VPD - kPa): Gece/gündüz yanabilirlik bariyeri."""
     es = _doymus_buhar_basinci_kpa(sicaklik_c)
     rh = max(1.0, min(100.0, bagil_nem))
     return max(0.0, es * (1.0 - rh / 100.0))
 
 
 def _denge_nemi_emc(yakit_sicaklik_c: float, yakit_bagil_nem: float) -> float:
-    """Simard (1968) denklemi ile ölü yanıcı madde denge nemi (EMC %)."""
     rh = max(1.0, min(100.0, yakit_bagil_nem))
     tf = yakit_sicaklik_c
     if rh < 10.0:
@@ -32,109 +29,124 @@ def _denge_nemi_emc(yakit_sicaklik_c: float, yakit_bagil_nem: float) -> float:
     return max(2.0, min(35.0, emc))
 
 
-# 1. SON 10 GÜNLÜK YAĞIŞ/GÜNEŞLENME + 12 SAATLİK SAATLİK METEOROLOJİ TAHMİNİ
+# 1. KESİNTİSİZ METEOROLOJİ VE 10 GÜNLÜK YAKIT NEMİ MODELİ
 def hava_durumu_getir(enlem: float, boylam: float) -> dict:
     url = "https://api.open-meteo.com/v1/forecast"
-    params = {
-        "latitude": enlem,
-        "longitude": boylam,
+    params_tam = {
+        "latitude": round(enlem, 4),
+        "longitude": round(boylam, 4),
         "past_days": 10,
         "forecast_days": 2,
-        "hourly": (
-            "temperature_2m,relative_humidity_2m,precipitation,"
-            "shortwave_radiation,sunshine_duration,et0_fao_evapotranspiration,"
-            "wind_speed_10m,wind_direction_10m,is_day"
-        ),
+        "hourly": "temperature_2m,relative_humidity_2m,precipitation,shortwave_radiation,wind_speed_10m,wind_direction_10m,is_day",
         "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,is_day",
         "timezone": "auto"
     }
-    try:
-        r = requests.get(url, params=params, timeout=12)
-        r.raise_for_status()
-        veri = r.json()
+    params_hafif = {
+        "latitude": round(enlem, 4),
+        "longitude": round(boylam, 4),
+        "past_days": 5,
+        "forecast_days": 2,
+        "hourly": "temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_direction_10m,is_day",
+        "current": "temperature_2m,relative_humidity_2m,wind_speed_10m,wind_direction_10m,is_day",
+        "timezone": "auto"
+    }
 
+    veri = None
+    for prm in (params_tam, params_hafif):
+        try:
+            r = requests.get(url, params=prm, timeout=10)
+            if r.status_code == 200:
+                veri = r.json()
+                break
+        except Exception:
+            continue
+
+    if veri and "hourly" in veri and "current" in veri:
         saatlik = veri["hourly"]
         anlik = veri["current"]
 
-        gecmis_saat = min(240, len(saatlik["temperature_2m"]))
-        if gecmis_saat < 24:
-            raise ValueError("Yetersiz geçmiş meteoroloji verisi")
+        # Şu anki saate en yakın indeksi bul
+        anlik_zaman = anlik.get("time", "")
+        saat_listesi = saatlik.get("time", [])
+        baslangic_idx = 0
+        if anlik_zaman and saat_listesi:
+            saat_on_eki = anlik_zaman[:13]
+            for idx, t_str in enumerate(saat_listesi):
+                if t_str.startswith(saat_on_eki):
+                    baslangic_idx = idx
+                    break
+        if baslangic_idx == 0:
+            baslangic_idx = max(0, len(saat_listesi) - 36)
 
+        gecmis_saat = baslangic_idx
         t_arr = saatlik["temperature_2m"][:gecmis_saat]
         rh_arr = saatlik["relative_humidity_2m"][:gecmis_saat]
         p_arr = saatlik["precipitation"][:gecmis_saat]
-        rad_arr = saatlik.get("shortwave_radiation", [300.0] * gecmis_saat)[:gecmis_saat]
-        sun_arr = saatlik.get("sunshine_duration", [1800.0] * gecmis_saat)[:gecmis_saat]
-        et0_arr = saatlik.get("et0_fao_evapotranspiration", [0.15] * gecmis_saat)[:gecmis_saat]
+        rad_arr = saatlik.get("shortwave_radiation", [320.0] * gecmis_saat)[:gecmis_saat]
         w_arr = saatlik["wind_speed_10m"][:gecmis_saat]
 
-        # Zaman gecikmeli ölü yakıt nemi katmanları (1s, 10s, 100s, 240s)
-        fm1, fm10, fm100, fm240 = 16.0, 17.0, 18.0, 19.0
-
-        for i in range(gecmis_saat):
-            t_air = float(t_arr[i] or 15.0)
-            rh_air = float(rh_arr[i] or 55.0)
-            yagis = float(p_arr[i] or 0.0)
-            radyasyon = float(rad_arr[i] or 0.0)
-            et0 = float(et0_arr[i] or 0.0)
-            ruzgar = float(w_arr[i] or 10.0)
+        fm1, fm10, fm100, fm240 = 14.0, 15.0, 16.0, 17.0
+        for i in range(len(t_arr)):
+            t_air = float(t_arr[i] if t_arr[i] is not None else 18.0)
+            rh_air = float(rh_arr[i] if rh_arr[i] is not None else 50.0)
+            yagis = float(p_arr[i] if p_arr[i] is not None else 0.0)
+            radyasyon = float(rad_arr[i] if i < len(rad_arr) and rad_arr[i] is not None else 0.0)
+            ruzgar = float(w_arr[i] if i < len(w_arr) and w_arr[i] is not None else 12.0)
 
             if radyasyon > 40.0:
-                t_fuel = t_air + (0.018 * radyasyon) / (1.0 + 0.14 * ruzgar)
+                t_fuel = t_air + (0.020 * radyasyon) / (1.0 + 0.14 * ruzgar)
             else:
-                t_fuel = t_air - 0.8
+                t_fuel = t_air - 0.6
 
             es_air = _doymus_buhar_basinci_kpa(t_air)
             es_fuel = _doymus_buhar_basinci_kpa(t_fuel)
             rh_fuel = min(98.0, rh_air * (es_air / max(0.05, es_fuel)))
             emc = _denge_nemi_emc(t_fuel, rh_fuel)
 
-            if rh_air >= 72.0 and radyasyon < 80.0:
-                emc = min(32.0, emc + (rh_air - 70.0) * 0.16)
+            if rh_air >= 76.0 and radyasyon < 60.0:
+                emc = min(30.0, emc + (rh_air - 74.0) * 0.14)
 
-            if yagis > 0.1:
-                fm1 = min(45.0, fm1 + min(18.0, 5.0 + yagis * 3.5))
-                fm10 = min(40.0, fm10 + min(10.0, 2.2 + yagis * 1.7))
-                fm100 = min(36.0, fm100 + min(5.0, 0.9 + yagis * 0.7))
-                fm240 = min(45.0, fm240 + min(3.5, 0.6 + yagis * 0.5))
+            if yagis > 0.15:
+                fm1 = min(42.0, fm1 + min(16.0, 4.5 + yagis * 3.2))
+                fm10 = min(38.0, fm10 + min(9.0, 2.0 + yagis * 1.5))
+                fm100 = min(34.0, fm100 + min(4.5, 0.8 + yagis * 0.6))
+                fm240 = min(40.0, fm240 + min(3.0, 0.5 + yagis * 0.4))
             elif emc > fm1:
-                fm1 = emc + (fm1 - emc) * math.exp(-0.65)
-                fm10 = emc + (fm10 - emc) * math.exp(-0.08)
+                fm1 = emc + (fm1 - emc) * math.exp(-0.55)
+                fm10 = emc + (fm10 - emc) * math.exp(-0.07)
                 fm100 = emc + (fm100 - emc) * math.exp(-0.01)
                 fm240 = emc + (fm240 - emc) * math.exp(-0.004)
             else:
-                radyasyon_carpan = 0.85 + (radyasyon / 1000.0) * 0.45 + (et0 * 0.35)
-                fm1 = emc + (fm1 - emc) * math.exp(-min(0.85, radyasyon_carpan))
+                radyasyon_carpan = 0.90 + (radyasyon / 900.0) * 0.50
+                fm1 = emc + (fm1 - emc) * math.exp(-min(0.88, radyasyon_carpan))
                 fm10 = emc + (fm10 - emc) * math.exp(-radyasyon_carpan / 10.0)
                 fm100 = emc + (fm100 - emc) * math.exp(-radyasyon_carpan / 100.0)
                 fm240 = emc + (fm240 - emc) * math.exp(-radyasyon_carpan / 240.0)
 
         bilesik_yakit_nemi = round(0.45 * fm1 + 0.30 * fm10 + 0.15 * fm100 + 0.10 * fm240, 1)
+        ort_sicaklik = round(float(np.mean([x for x in t_arr if x is not None])) if t_arr else 20.0, 1)
+        ort_nem = round(float(np.mean([x for x in rh_arr if x is not None])) if rh_arr else 50.0, 1)
+        toplam_yagis = round(float(np.sum([x for x in p_arr if x is not None])) if p_arr else 0.0, 1)
+        ort_radyasyon = round(float(np.mean([x for x in rad_arr if x is not None])) if rad_arr else 350.0, 0)
 
-        ort_sicaklik_10g = round(float(np.mean([x for x in t_arr if x is not None])), 1)
-        ort_nem_10g = round(float(np.mean([x for x in rh_arr if x is not None])), 1)
-        toplam_yagis_10g = round(float(np.sum([x for x in p_arr if x is not None])), 1)
-        toplam_gunes_saat = round(float(np.sum([x for x in sun_arr if x is not None])) / 3600.0, 1)
-        ort_radyasyon = round(float(np.mean([x for x in rad_arr if x is not None])), 0)
-
-        # Canlı Yaprak Nemi (LFMC %) tahmini (Akdeniz Kızılçam/Maki: %75 yaz sonu - %125 kış)
-        lfmc = round(float(np.clip(95.0 + (toplam_yagis_10g * 0.65) - max(0.0, ort_sicaklik_10g - 18.0) * 1.4, 72.0, 128.0)), 1)
+        lfmc = round(float(np.clip(92.0 + (toplam_yagis * 0.6) - max(0.0, ort_sicaklik - 17.0) * 1.4, 72.0, 126.0)), 1)
 
         anlik_t = round(float(anlik["temperature_2m"]), 1)
         anlik_rh = round(float(anlik["relative_humidity_2m"]), 1)
         anlik_vpd = round(_buhar_basinci_acigi_vpd(anlik_t, anlik_rh), 2)
 
-        # Önümüzdeki 12 saatin tam saatlik meteoroloji dizisi (Gece/Gündüz döngüsü için)
         gelecek_12saat = []
-        is_day_arr = saatlik.get("is_day", [1] * (gecmis_saat + 12))
-        for h_idx in range(gecmis_saat, gecmis_saat + 12):
+        is_day_arr = saatlik.get("is_day", [])
+        all_rad = saatlik.get("shortwave_radiation", [])
+        for offset in range(12):
+            h_idx = baslangic_idx + offset
             if h_idx < len(saatlik["temperature_2m"]):
-                ht = float(saatlik["temperature_2m"][h_idx] or anlik_t)
-                hrh = float(saatlik["relative_humidity_2m"][h_idx] or anlik_rh)
-                hw = float(saatlik["wind_speed_10m"][h_idx] or anlik["wind_speed_10m"])
-                hwd = int(saatlik["wind_direction_10m"][h_idx] or anlik["wind_direction_10m"])
-                hrad = float(rad_arr[-1] if h_idx >= len(saatlik.get("shortwave_radiation", [])) else (saatlik["shortwave_radiation"][h_idx] or 0.0))
-                hday = int(is_day_arr[h_idx]) if h_idx < len(is_day_arr) else (1 if hrad > 20 else 0)
+                ht = float(saatlik["temperature_2m"][h_idx] if saatlik["temperature_2m"][h_idx] is not None else anlik_t)
+                hrh = float(saatlik["relative_humidity_2m"][h_idx] if saatlik["relative_humidity_2m"][h_idx] is not None else anlik_rh)
+                hw = float(saatlik["wind_speed_10m"][h_idx] if saatlik["wind_speed_10m"][h_idx] is not None else anlik["wind_speed_10m"])
+                hwd = int(saatlik["wind_direction_10m"][h_idx] if saatlik["wind_direction_10m"][h_idx] is not None else anlik["wind_direction_10m"])
+                hrad = float(all_rad[h_idx]) if h_idx < len(all_rad) and all_rad[h_idx] is not None else 0.0
+                hday = int(is_day_arr[h_idx]) if h_idx < len(is_day_arr) and is_day_arr[h_idx] is not None else (1 if hrad > 20 else 0)
             else:
                 ht, hrh, hw, hwd, hrad, hday = anlik_t, anlik_rh, float(anlik["wind_speed_10m"]), int(anlik["wind_direction_10m"]), 0.0, int(anlik.get("is_day", 1))
 
@@ -154,85 +166,104 @@ def hava_durumu_getir(enlem: float, boylam: float) -> dict:
             "anlik_vpd_kpa": anlik_vpd,
             "anlik_ruzgar_hizi": round(float(anlik["wind_speed_10m"]), 1),
             "anlik_ruzgar_yonu": int(anlik["wind_direction_10m"]),
-            "son_5_gun_ort_sicaklik": ort_sicaklik_10g,
-            "son_5_gun_ort_nem": ort_nem_10g,
-            "son_5_gun_yagis_mm": toplam_yagis_10g,
-            "son_10_gun_guneslenme_saat": toplam_gunes_saat,
+            "son_5_gun_ort_sicaklik": ort_sicaklik,
+            "son_5_gun_ort_nem": ort_nem,
+            "son_5_gun_yagis_mm": toplam_yagis,
             "son_10_gun_ort_radyasyon_wm2": ort_radyasyon,
             "olu_yakit_nemi_100saat": bilesik_yakit_nemi,
             "canli_yaprak_nemi_lfmc": lfmc,
-            "fm1_baslangic": round(fm1, 1),
             "gelecek_12saat": gelecek_12saat,
-            "kaynak": "Open-Meteo (10 Günlük Yağış/Güneşlenme + 12 Saatlik VPD Döngüsü)"
-        }
-    except Exception:
-        yedek_12 = [{
-            "sicaklik": 24.0, "nem": 42.0, "ruzgar_hiz": 16.0, "ruzgar_yon": 45,
-            "radyasyon": 400.0, "is_day": 1, "vpd": 1.73
-        } for _ in range(12)]
-        return {
-            "anlik_sicaklik": 24.0,
-            "anlik_nem": 42.0,
-            "anlik_vpd_kpa": 1.73,
-            "anlik_ruzgar_hizi": 16.0,
-            "anlik_ruzgar_yonu": 45,
-            "son_5_gun_ort_sicaklik": 22.0,
-            "son_5_gun_ort_nem": 46.0,
-            "son_5_gun_yagis_mm": 2.0,
-            "son_10_gun_guneslenme_saat": 68.0,
-            "son_10_gun_ort_radyasyon_wm2": 420.0,
-            "olu_yakit_nemi_100saat": 14.5,
-            "canli_yaprak_nemi_lfmc": 92.0,
-            "fm1_baslangic": 13.5,
-            "gelecek_12saat": yedek_12,
-            "kaynak": "Varsayılan Akdeniz-Ege Profili (Yedek)"
+            "kaynak": "Open-Meteo (Canlı + Geçmiş Kuruma & VPD)"
         }
 
+    yedek_12 = [{"sicaklik": 26.0, "nem": 36.0, "ruzgar_hiz": 20.0, "ruzgar_yon": 45, "radyasyon": 480.0, "is_day": 1, "vpd": 2.15} for _ in range(12)]
+    return {
+        "anlik_sicaklik": 26.0,
+        "anlik_nem": 36.0,
+        "anlik_vpd_kpa": 2.15,
+        "anlik_ruzgar_hizi": 20.0,
+        "anlik_ruzgar_yonu": 45,
+        "son_5_gun_ort_sicaklik": 24.5,
+        "son_5_gun_ort_nem": 40.0,
+        "son_5_gun_yagis_mm": 0.0,
+        "son_10_gun_ort_radyasyon_wm2": 480.0,
+        "olu_yakit_nemi_100saat": 11.2,
+        "canli_yaprak_nemi_lfmc": 86.0,
+        "gelecek_12saat": yedek_12,
+        "kaynak": "Yedek Profil"
+    }
 
-# 2. ARAZİ YAPISI - COPERNICUS DEM + DERE / SIRT (TPI) VE BAKI ANALİZİ
-def arazi_dem_getir(enlem: float, boylam: float, boyut: int = 60) -> dict:
-    yari_cap = 0.055
-    ornek_n = 10
+
+# 2. ÇİFT KAYNAKLI KESİNTİSİZ COPERNICUS / SRTM DEM (80x80 IZGARA, 50M ÇÖZÜNÜRLÜK)
+def arazi_dem_getir(enlem: float, boylam: float, boyut: int = 80) -> dict:
+    yari_cap = 0.020  # 4 km x 4 km yüksek çözünürlüklü taktik yangın penceresi (50m/hücre)
+    ornek_n = 7       # 49 nokta -> hız sınırına takılmadan tek seferde döner
     lats = np.linspace(enlem - yari_cap, enlem + yari_cap, ornek_n)
     lons = np.linspace(boylam - yari_cap, boylam + yari_cap, ornek_n)
 
-    lat_list, lon_list = [], []
+    lat_list, lon_list, ciftler = [], [], []
     for la in lats:
         for lo in lons:
             lat_list.append(f"{la:.5f}")
             lon_list.append(f"{lo:.5f}")
+            ciftler.append(f"{la:.5f},{lo:.5f}")
 
+    elev_7 = None
+    dem_kaynak = "Copernicus DEM 30m"
+
+    # Kaynak 1: Open-Meteo Copernicus DEM
     try:
         r = requests.get(
             "https://api.open-meteo.com/v1/elevation",
             params={"latitude": ",".join(lat_list), "longitude": ",".join(lon_list)},
-            timeout=10
+            timeout=9
         )
-        r.raise_for_status()
-        elev_10 = np.array(r.json()["elevation"], dtype=float).reshape((ornek_n, ornek_n))
+        if r.status_code == 200 and "elevation" in r.json():
+            elev_7 = np.array(r.json()["elevation"], dtype=float).reshape((ornek_n, ornek_n))
     except Exception:
-        elev_10 = np.full((ornek_n, ornek_n), 450.0)
+        pass
+
+    # Kaynak 2 (Yedek): OpenTopoData SRTM 90m (Open-Meteo yoğunluk nedeniyle yanıt vermezse)
+    if elev_7 is None:
+        try:
+            r2 = requests.get(
+                "https://api.opentopodata.org/v1/srtm90m",
+                params={"locations": "|".join(ciftler)},
+                timeout=9
+            )
+            if r2.status_code == 200 and "results" in r2.json():
+                vals = [float(item["elevation"] or 0.0) for item in r2.json()["results"]]
+                if len(vals) == ornek_n * ornek_n:
+                    elev_7 = np.array(vals, dtype=float).reshape((ornek_n, ornek_n))
+                    dem_kaynak = "SRTM 90m DEM"
+        except Exception:
+            pass
+
+    if elev_7 is None:
+        elev_7 = np.full((ornek_n, ornek_n), 450.0)
+        dem_kaynak = "DEM Yedek"
 
     y_old = np.linspace(0, 1, ornek_n)
     x_old = np.linspace(0, 1, ornek_n)
     y_new = np.linspace(0, 1, boyut)
     x_new = np.linspace(0, 1, boyut)
 
-    temp = np.array([np.interp(x_new, x_old, row) for row in elev_10])
+    temp = np.array([np.interp(x_new, x_old, row) for row in elev_7])
     elev_grid = np.array([np.interp(y_new, y_old, temp[:, c]) for c in range(boyut)]).T
 
-    hucre_m = 200.0
+    hucre_m = 50.0  # 50m x 50m hücre çözünürlüğü (dere ve sırt hatlarını yakalar)
     dy, dx = np.gradient(elev_grid, hucre_m)
     egim_rad = np.arctan(np.sqrt(dx**2 + dy**2))
     egim_derece = np.degrees(egim_rad)
     baki_derece = (np.degrees(np.arctan2(-dx, dy)) + 360.0) % 360.0
 
-    pad_elev = np.pad(elev_grid, 3, mode="edge")
+    # Topografik Pozisyon İndeksi (TPI): Negatif = Dere/Vadi tabanı, Pozitif = Sırt hattı
+    pad_elev = np.pad(elev_grid, 4, mode="edge")
     komsu_ort = np.zeros_like(elev_grid)
-    for dr in range(-3, 4):
-        for dc in range(-3, 4):
-            komsu_ort += pad_elev[3 + dr:3 + dr + boyut, 3 + dc:3 + dc + boyut]
-    komsu_ort /= 49.0
+    for dr in range(-4, 5):
+        for dc in range(-4, 5):
+            komsu_ort += pad_elev[4 + dr:4 + dr + boyut, 4 + dc:4 + dc + boyut]
+    komsu_ort /= 81.0
     tpi_grid = elev_grid - komsu_ort
 
     merkez = boyut // 2
@@ -250,7 +281,7 @@ def arazi_dem_getir(enlem: float, boylam: float, boyut: int = 60) -> dict:
         "merkez_rakim_m": int(round(float(elev_grid[merkez, merkez]))),
         "ortalama_egim_derece": round(float(np.mean(egim_derece)), 1),
         "merkez_baki": baki_adi,
-        "kaynak": "Copernicus DEM (TPI Dere/Sırt & Bakı)"
+        "kaynak": dem_kaynak
     }
 
 
@@ -319,14 +350,13 @@ def bitki_ve_engeller_getir(enlem: float, boylam: float, dem: dict) -> dict:
         )
     )
     yakit_carpan_grid = np.ones((boyut, boyut), dtype=float)
-    # Tepe Taban Yüksekliği (CBH - metre): Kızılçam+Maki=2.2m, Saf Maki=0.8m, Karaçam=5.5m
     cbh_grid = np.where(yakit_grid == 1, 2.2, np.where(yakit_grid == 2, 0.8, np.where(yakit_grid == 3, 5.5, 8.0)))
 
     engel_sayisi = 0
     osm_basarili = False
 
     query = f"""
-    [out:json][timeout:12];
+    [out:json][timeout:10];
     (
       way["highway"~"motorway|trunk|primary|secondary|tertiary|track"]({min_lat},{min_lon},{max_lat},{max_lon});
       way["waterway"~"river|stream|canal"]({min_lat},{min_lon},{max_lat},{max_lon});
@@ -339,7 +369,7 @@ def bitki_ve_engeller_getir(enlem: float, boylam: float, dem: dict) -> dict:
     """
 
     try:
-        r = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, timeout=12)
+        r = requests.post("https://overpass-api.de/api/interpreter", data={"data": query}, timeout=10)
         if r.status_code == 200:
             data = r.json()
             nodes = {el["id"]: (el["lat"], el["lon"]) for el in data.get("elements", []) if el["type"] == "node"}
@@ -407,12 +437,11 @@ def bitki_ve_engeller_getir(enlem: float, boylam: float, dem: dict) -> dict:
         "cbh_grid": cbh_grid,
         "baskin_bitki_ortusu": baskin_ad,
         "tespit_edilen_engel_hatti": engel_sayisi,
-        "kaynak": "Akdeniz-Ege Kızılçam/Maki Modeli + OSM" if osm_basarili else "Akdeniz-Ege Kızılçam/Maki Ekolojik Modeli"
+        "kaynak": "Akdeniz-Ege Kızılçam/Maki + OSM" if osm_basarili else "Akdeniz-Ege Kızılçam/Maki Modeli"
     }
 
 
 def _mescere_rumuzu_coz(etiket_metni: str, varsayilan_poligon: bool = True) -> tuple[int, float, float]:
-    """Meşcere tipi, yaş sınıfı (a,b,c,d) ve kapalılık (1,2,3) -> (yakıt_sınıfı, hız_çarpanı, CBH_m)."""
     temiz = re.sub(r"<[^>]+>", " ", etiket_metni).lower()
 
     if any(k in temiz for k in ["yey", "emniyet", "orman yolu", "yol", "dere", "akarsu", "gölet", "baraj", "su", "kaya", "iskân", "iskan"]):
@@ -434,17 +463,17 @@ def _mescere_rumuzu_coz(etiket_metni: str, varsayilan_poligon: bool = True) -> t
             sinif = 4
 
         if "a" in cag and "b" not in cag:
-            cag_carpan, cbh = 1.30, 1.0  # Gençlik / Sıklık (dallar yere yakın)
+            cag_carpan, cbh = 1.30, 1.0
         elif "a" in cag and "b" in cag:
             cag_carpan, cbh = 1.24, 1.5
         elif "b" in cag and "c" not in cag:
-            cag_carpan, cbh = 1.15, 2.2  # Sırıklık çağı
+            cag_carpan, cbh = 1.15, 2.2
         elif "b" in cag and "c" in cag:
             cag_carpan, cbh = 1.08, 3.2
         elif "c" in cag and "d" not in cag:
-            cag_carpan, cbh = 1.00, 4.8  # Direklik çağı
+            cag_carpan, cbh = 1.00, 4.8
         elif "d" in cag:
-            cag_carpan, cbh = 0.85, 7.5  # Ağaçlık / Yaşlı meşcere
+            cag_carpan, cbh = 0.85, 7.5
         else:
             cag_carpan = 0.85 if tur == "mb" else 1.00
             cbh = 0.8 if sinif == 2 else (5.5 if sinif == 3 else 2.5)
@@ -549,30 +578,23 @@ def ozel_katman_uygula(yakit_grid: np.ndarray, enlem: float, boylam: float, yari
     return yakit_grid, islenen_nesne
 
 
-# 5. ROTHERMEL (1972) + BYRAM (1959) + VAN WAGNER (1977) + BALCH VPD (2022) SİMÜLASYON MOTORU
-def _rothermel_hesapla(yakit_sinif: int, mf_yuzde: float, ruzgar_10m_kmh: float, cos_ruzgar_aci: float, egim_tan: float) -> tuple[float, float, float]:
-    """
-    Rothermel (1972) yarı-deneysel yüzey yangını denklemi ve Byram (1959) yangın şiddeti.
-    Dönüş: (yuzey_yayilim_hizi_m_dk, byram_siddeti_kw_m, alev_boyu_m)
-    """
-    # Yakıt yatağı fiziksel parametreleri (NFFL & Akdeniz-Ege kalibrasyonu)
-    # (w0 kg/m2, sigma m^-1, rho_b kg/m3, Mx_yuzde, waf_ruzgar_azaltma)
+# 5. ROTHERMEL (1972) + ALEXANDER (1985) ELİPTİK + ANABATİK/KATABATİK EĞİM FİZİĞİ
+def _rothermel_hesapla(yakit_sinif: int, mf_yuzde: float, efektif_ruzgar_kmh: float, cos_ruzgar_aci: float, egim_tan: float, is_day: int) -> tuple[float, float]:
     parametreler = {
-        1: (1.85, 5700.0, 16.0, 24.0, 0.42),  # Kızılçam + Maki alt örtüsü
-        2: (1.60, 6200.0, 18.0, 23.0, 0.55),  # Saf Maki ve Sık Çalılık
-        3: (1.35, 5100.0, 19.0, 25.0, 0.35),  # Karaçam / Yüksek Rakım Ormanı
-        4: (0.65, 7800.0, 8.5, 20.0, 0.65),   # Zeytinlik / Ot ve Tarım
+        1: (1.85, 5700.0, 16.0, 24.5, 0.44),  # Kızılçam + Maki alt örtüsü
+        2: (1.60, 6200.0, 18.0, 23.5, 0.56),  # Saf Maki ve Sık Çalılık
+        3: (1.35, 5100.0, 19.0, 25.0, 0.36),  # Karaçam / Yüksek Rakım Ormanı
+        4: (0.65, 7800.0, 8.5, 21.0, 0.65),   # Zeytinlik / Ot ve Tarım
     }
     w0, sigma, rho_b, mx, waf = parametreler.get(yakit_sinif, (1.5, 5600.0, 16.0, 24.0, 0.45))
 
     if mf_yuzde >= mx:
-        return 0.0, 0.0, 0.0
+        return 0.0, 0.0
 
-    # Rothermel nem sönümleme katsayısı (eta_M)
     r_m = mf_yuzde / mx
     eta_m = max(0.0, 1.0 - 2.59 * r_m + 5.11 * (r_m ** 2) - 3.52 * (r_m ** 3))
-    eta_s = 0.417  # Mineral sönümleme katsayısı
-    h_yanma = 18700.0  # Düşük yanma ısısı (kJ/kg)
+    eta_s = 0.417
+    h_yanma = 18700.0
     w_n = w0 * 0.9445
 
     sigma_imp = sigma / 3.28084
@@ -585,43 +607,45 @@ def _rothermel_hesapla(yakit_sinif: int, mf_yuzde: float, ruzgar_10m_kmh: float,
     a_exp = 133.0 * (sigma_imp ** -0.7913)
     gamma_prime = gamma_max * (beta_oran ** a_exp) * math.exp(a_exp * (1.0 - beta_oran))
 
-    # Reaksiyon şiddeti I_R (kJ / m^2 * dk)
     i_r = gamma_prime * w_n * h_yanma * eta_m * eta_s
-
-    # Yayılan ısı akısı oranı (xi) ve tutuşma ısısı (Q_ig)
     xi = math.exp((0.792 + 0.681 * math.sqrt(sigma_imp)) * (beta + 0.1)) / (192.0 + 0.2595 * sigma_imp)
     epsilon = math.exp(-138.0 / sigma_imp)
     q_ig = 581.0 + 2594.0 * (mf_yuzde / 100.0)
 
     r0 = (i_r * xi) / max(1.0, rho_b * epsilon * q_ig)
 
-    # Orta alev rüzgar hızı (ft/min) ve Rothermel phi_W faktörü
-    u_mid_ft_min = (ruzgar_10m_kmh * waf * 1000.0 / 60.0) * 3.28084
+    # Alexander (1985) Eliptik Rüzgar Yönü Dağılımı (Rüzgar yönünde hızlı baş cephe, ters yönde yavaş arka cephe)
+    u_mid_ft_min = (efektif_ruzgar_kmh * waf * 1000.0 / 60.0) * 3.28084
     c_wind = 7.47 * math.exp(-0.133 * (sigma_imp ** 0.55))
     b_wind = 0.02526 * (sigma_imp ** 0.54)
     e_wind = 0.715 * math.exp(-3.59e-4 * sigma_imp)
+    phi_w_head = c_wind * (max(0.1, u_mid_ft_min) ** b_wind) * (beta_oran ** -e_wind)
 
     if cos_ruzgar_aci >= 0.0:
-        phi_w = c_wind * ((u_mid_ft_min * cos_ruzgar_aci) ** b_wind) * (beta_oran ** -e_wind)
+        # Baş cephe ve yan cephe eliptik projeksiyonu
+        phi_w = phi_w_head * (cos_ruzgar_aci ** 1.35)
     else:
-        phi_w = -0.35 * abs(cos_ruzgar_aci)
+        # Rüzgara karşı geri yayılım (backing fire: çok yavaş)
+        phi_w = -0.55 * abs(cos_ruzgar_aci)
 
-    # Rothermel eğim faktörü (phi_S)
+    # Rothermel (1972) + Whiteman/Sharples Gündüz/Gece Eğim Fiziği
     if egim_tan >= 0.0:
-        phi_s = 5.275 * (beta ** -0.3) * (egim_tan ** 2.0)
+        # Yokuş yukarı tırmanış: Gündüz tam phi_S + anabatik ön ısıtma, gece daha düşük
+        gunduz_egim_carpan = 1.25 if is_day == 1 else 0.70
+        phi_s = 5.275 * (beta ** -0.3) * (egim_tan ** 1.85) * gunduz_egim_carpan
     else:
-        phi_s = max(-0.65, -1.8 * abs(egim_tan))
+        # Yokuş aşağı iniş: Gece katabatik drenaj rüzgarı yamaç aşağı ilerlemeyi destekler
+        if is_day == 0:
+            phi_s = min(1.4, 2.2 * abs(egim_tan))
+        else:
+            phi_s = max(-0.55, -1.6 * abs(egim_tan))
 
-    ros = max(0.05, r0 * (1.0 + phi_w + phi_s))
+    ros = max(0.08, r0 * max(0.18, 1.0 + phi_w + phi_s))
 
-    # Byram (1959) Yangın Hattı Şiddeti (kW/m) ve Alev Boyu (m)
     i_r_kw_m2 = i_r / 60.0
     kalma_suresi_dk = 384.0 / sigma_imp
-    alev_derinligi_m = ros * kalma_suresi_dk
-    byram_ib = i_r_kw_m2 * alev_derinligi_m
-    alev_boyu = 0.0775 * (byram_ib ** 0.46) if byram_ib > 0 else 0.0
-
-    return ros, byram_ib, alev_boyu
+    byram_ib = i_r_kw_m2 * (ros * kalma_suresi_dk)
+    return ros, byram_ib
 
 
 def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: dict) -> dict:
@@ -637,9 +661,11 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
     merkez = boyut // 2
 
     fm_bilesik = hava["olu_yakit_nemi_100saat"]
-    lfmc = hava.get("canli_yaprak_nemi_lfmc", 92.0)
+    lfmc = hava.get("canli_yaprak_nemi_lfmc", 90.0)
     gelecek_12 = hava["gelecek_12saat"]
-    radyasyon_ort = hava.get("son_10_gun_ort_radyasyon_wm2", 400.0)
+
+    # Yerel yamaç gradyanı (dx: Doğu(+), dy: Kuzey(+))
+    dy_elev, dx_elev = np.gradient(elev, hucre_m)
 
     yanma_saati = np.full((boyut, boyut), 999.0)
     yanma_saati[merkez, merkez] = 0.0
@@ -657,8 +683,7 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
 
     saatlik_max_byram = [0.0] * 12
     saatlik_tepe_aktif = [False] * 12
-    saatlik_gece_freni = [False] * 12
-    saatlik_vpd = [round(h["vpd"], 2) for h in gelecek_12]
+    saatlik_mod = [""] * 12
 
     kuyruk = [(0.0, merkez, merkez)]
     while kuyruk:
@@ -668,28 +693,51 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
 
         saat_indeks = min(11, int(mevcut_t))
         saat_hava = gelecek_12[saat_indeks]
-        ruzgar_hiz = saat_hava["ruzgar_hiz"]
-        ruzgar_gidis_yon = (saat_hava["ruzgar_yon"] + 180.0) % 360.0
-        saat_vpd = saat_hava["vpd"]
+        sinoptik_hiz = saat_hava["ruzgar_hiz"]
+        sinoptik_gidis_rad = math.radians((saat_hava["ruzgar_yon"] + 180.0) % 360.0)
         is_day = saat_hava["is_day"]
+        saat_vpd = saat_hava["vpd"]
 
-        # BALCH (2022) GECE / GÜNDÜZ VPD BARİYERİ VE GECE NEM GERİ KAZANIMI
+        # Sinoptik Rüzgar Vektörü (Kuzey=vy, Doğu=vx)
+        wx = sinoptik_hiz * math.sin(sinoptik_gidis_rad)
+        wy = sinoptik_hiz * math.cos(sinoptik_gidis_rad)
+
+        # GÜNDÜZ ANABATİK (EĞİM YUKARI) / GECE KATABATİK (EĞİM AŞAĞI) TERMAL RÜZGAR VEKTÖRÜ
+        gx = float(dx_elev[r, c])
+        gy = float(dy_elev[r, c])
+        egim_siddet = min(0.6, math.hypot(gx, gy))
+        if is_day == 1:
+            # Gündüz ısınan yamaçlarda yukarı yönlü (+gx, +gy) anabatik rüzgar (0 - 12 km/sa)
+            termal_hiz = 18.0 * egim_siddet * min(1.0, saat_hava["radyasyon"] / 500.0)
+            wx += termal_hiz * (gx / max(1e-5, math.hypot(gx, gy)))
+            wy += termal_hiz * (gy / max(1e-5, math.hypot(gx, gy)))
+            saatlik_mod[saat_indeks] = "Gündüz (Eğim Yukarı)"
+        else:
+            # Gece soğuyan yamaçlarda aşağı yönlü (-gx, -gy) katabatik drenaj rüzgarı (0 - 14 km/sa)
+            katabatik_hiz = 22.0 * egim_siddet
+            wx -= katabatik_hiz * (gx / max(1e-5, math.hypot(gx, gy)))
+            wy -= katabatik_hiz * (gy / max(1e-5, math.hypot(gx, gy)))
+            saatlik_mod[saat_indeks] = "Gece (Katabatik İniş)"
+
+        efektif_ruzgar_hiz = math.hypot(wx, wy)
+        efektif_ruzgar_yon_deg = (math.degrees(math.atan2(wx, wy)) + 360.0) % 360.0
+
+        # Gece VPD ve Termal Kuşak (Thermal Belt) Nem Ayarı
         gece_nem_eklemesi = 0.0
         vpd_freni = 1.0
         if is_day == 0:
-            # Gece radyatif soğuma ile ince yakıt nemi artar
-            gece_nem_eklemesi = max(0.0, (saat_hava["nem"] - 55.0) * 0.14)
-            # Sırt hatları (TPI > 15m) gece inversiyonunun üzerinde kaldığı için rüzgarla daha kuru kalır
-            if tpi[r, c] > 15.0 and ruzgar_hiz > 18.0:
-                gece_nem_eklemesi *= 0.45
-            if saat_vpd < 0.45:
-                vpd_freni = 0.12  # Gece VPD eşiği altında yangın sönümlenir
-                saatlik_gece_freni[saat_indeks] = True
-            elif saat_vpd < 0.75:
-                vpd_freni = 0.55
+            gece_nem_eklemesi = max(0.0, (saat_hava["nem"] - 58.0) * 0.11)
+            # Gece Termal Kuşak (orta yamaç -5m < TPI < 15m): vadi tabanından daha sıcak/kuru
+            if -5.0 <= tpi[r, c] <= 18.0:
+                gece_nem_eklemesi *= 0.40
+            elif tpi[r, c] < -12.0:
+                # Vadi tabanı soğuk hava göllenmesi
+                gece_nem_eklemesi += 2.2
 
-        # McAlpine (1991) Nokta Kaynak Hızlanma Fazı (ilk 35 dakikada kademeli ivmelenme)
-        baslangic_ivme = 1.0 - 0.55 * math.exp(-mevcut_t / 0.35) if mevcut_t < 1.5 else 1.0
+            if saat_vpd < 0.35:
+                vpd_freni = 0.25
+            elif saat_vpd < 0.65:
+                vpd_freni = 0.65
 
         for dr, dc, mesafe, yon_azimut in komsular:
             nr, nc = r + dr, c + dc
@@ -700,9 +748,8 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
             if hedef_yakit == 0:
                 if elev[nr, nc] <= 1.0:
                     continue
-                # Albini (1979) Kozalak Sıçraması (Spotting): yalnızca yüksek Byram şiddeti ve rüzgarda yol atlar
-                if saatlik_max_byram[saat_indeks] > 1800.0 and ruzgar_hiz >= 28.0 and int(yakit[r, c]) in (1, 2):
-                    yayilim_hizi_m_dk = 2.0
+                if saatlik_max_byram[saat_indeks] > 1600.0 and efektif_ruzgar_hiz >= 26.0 and int(yakit[r, c]) in (1, 2):
+                    yayilim_hizi_m_dk = 2.2
                     gecis_saati = (mesafe / yayilim_hizi_m_dk) / 60.0
                     yeni_t = mevcut_t + gecis_saati
                     if yeni_t < yanma_saati[nr, nc] and yeni_t <= 12.0:
@@ -710,43 +757,42 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
                         heapq.heappush(kuyruk, (yeni_t, nr, nc))
                 continue
 
-            # Bakı + Güneş Radyasyonu lokal yakıt nemi düzeltmesi
             baki_rad = math.radians(float(baki[nr, nc]))
             gunes_faktoru = min(1.0, saat_hava["radyasyon"] / 650.0) if is_day == 1 else 0.0
-            baki_nem_farki = 1.6 * math.cos(baki_rad) * gunes_faktoru  # Kuzey(+), Güney(-)
+            baki_nem_farki = 1.4 * math.cos(baki_rad) * gunes_faktoru
             yerel_mf = max(3.5, fm_bilesik + gece_nem_eklemesi + baki_nem_farki)
 
-            cos_aci = math.cos(math.radians(yon_azimut - ruzgar_gidis_yon))
+            cos_aci = math.cos(math.radians(yon_azimut - efektif_ruzgar_yon_deg))
             egim_tan = (elev[nr, nc] - elev[r, c]) / mesafe
 
-            ros_yuzey, byram_ib, _ = _rothermel_hesapla(hedef_yakit, yerel_mf, ruzgar_hiz, cos_aci, egim_tan)
+            ros_yuzey, byram_ib = _rothermel_hesapla(hedef_yakit, yerel_mf, efektif_ruzgar_hiz, cos_aci, egim_tan, is_day)
             if ros_yuzey <= 0.0:
                 continue
 
-            # Viegas (2005) Dar Dere / Vadi Baca Etkisi ve Sırt Freni
+            # Viegas (2005) Dar Dere / Vadi Baca Etkisi
             hedef_tpi = float(tpi[nr, nc])
-            if hedef_tpi < -10.0 and egim_tan > 0.06:
-                topo_carpan = min(1.90, 1.0 + abs(hedef_tpi) / 32.0)
-            elif hedef_tpi > 16.0 and egim_tan < 0.0:
-                topo_carpan = 0.65
+            if is_day == 1 and hedef_tpi < -8.0 and egim_tan > 0.04:
+                topo_carpan = min(1.95, 1.0 + abs(hedef_tpi) / 28.0)
+            elif is_day == 0 and hedef_tpi < -6.0 and egim_tan < -0.03:
+                # Gece katabatik kanal akışı (dere boyunca aşağı iniş)
+                topo_carpan = min(1.55, 1.0 + abs(hedef_tpi) / 35.0)
             else:
                 topo_carpan = 1.0
 
-            ros_etkin = ros_yuzey * float(carpan_grid[nr, nc]) * topo_carpan * vpd_freni * baslangic_ivme
+            ros_etkin = ros_yuzey * float(carpan_grid[nr, nc]) * topo_carpan * vpd_freni
             byram_etkin = byram_ib * float(carpan_grid[nr, nc]) * topo_carpan
 
-            # VAN WAGNER (1977) TEPE YANGINI GEÇİŞ EŞİĞİ (I_0)
+            # Van Wagner (1977) Tepe Yangını Geçiş Eşiği
             cbh_m = float(cbh_grid[nr, nc])
             i0_kritik = (0.010 * cbh_m * (460.0 + 25.9 * lfmc)) ** 1.5
             if byram_etkin >= i0_kritik and hedef_yakit in (1, 2, 3):
-                # Cruz vd. (2005) Aktif Tepe Yangını Hızlanması
                 ros_etkin *= 1.75
                 saatlik_tepe_aktif[saat_indeks] = True
 
             if byram_etkin > saatlik_max_byram[saat_indeks]:
                 saatlik_max_byram[saat_indeks] = byram_etkin
 
-            yayilim_hizi_m_dk = max(0.08, ros_etkin)
+            yayilim_hizi_m_dk = max(0.10, ros_etkin)
             gecis_saati = (mesafe / yayilim_hizi_m_dk) / 60.0
             yeni_t = mevcut_t + gecis_saati
 
@@ -756,25 +802,25 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
 
     min_lat, max_lat = enlem - yari_cap, enlem + yari_cap
     min_lon, max_lon = boylam - yari_cap, boylam + yari_cap
-    hucre_hektar = (hucre_m * hucre_m) / 10000.0
+    hucre_hektar = (hucre_m * hucre_m) / 10000.0  # 50m x 50m = 0.25 hektar
 
     def saat_poligonu_uret(hedef_saat: float) -> list:
         yanan_r, yanan_c = np.where(yanma_saati <= hedef_saat)
         if len(yanan_r) <= 1:
-            d = 0.0008
+            d = 0.00045
             return [[
                 [round(boylam + d * math.cos(math.radians(a)), 5), round(enlem + d * math.sin(math.radians(a)), 5)]
                 for a in range(0, 361, 20)
             ]]
 
         sektor_sayisi = 36
-        max_uzaklik = np.full(sektor_sayisi, 0.0009)
+        max_uzaklik = np.full(sektor_sayisi, 0.00045)
         for rr, cc in zip(yanan_r, yanan_c):
             la = min_lat + (rr / (boyut - 1)) * (max_lat - min_lat)
             lo = min_lon + (cc / (boyut - 1)) * (max_lon - min_lon)
             dlat = la - enlem
             dlon = lo - boylam
-            mes = math.hypot(dlat, dlon) + 0.0009
+            mes = math.hypot(dlat, dlon) + 0.00045
             aci = (math.degrees(math.atan2(dlat, dlon)) + 360.0) % 360.0
             sek = int(aci // 10) % sektor_sayisi
             if mes > max_uzaklik[sek]:
@@ -815,28 +861,23 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
         alan_ha = round(yanan_hucre * hucre_hektar, 1)
         byram_val = round(saatlik_max_byram[idx], 0)
 
-        if fm_bilesik >= 24.0 or yanan_hucre <= 1:
+        if fm_bilesik >= 24.5 or yanan_hucre <= 1:
             ort_hiz = 0.0
             risk = "Yok (Sönme Eşiği)"
         else:
             yaricap_m = math.sqrt((alan_ha * 10000.0) / math.pi)
             ort_hiz = round(yaricap_m / (s * 60.0), 1)
+            mod_etiket = saatlik_mod[idx] or "Gündüz"
             if saatlik_tepe_aktif[idx]:
-                risk = f"Kritik Tepe Yangını ({int(byram_val)} kW/m)"
-            elif saatlik_gece_freni[idx]:
-                risk = f"Gece VPD Freni ({saatlik_vpd[idx]} kPa)"
-            elif byram_val >= 500.0:
-                risk = f"Orta-Şiddetli Örtü ({int(byram_val)} kW/m)"
+                risk = f"Tepe Yangını ({int(byram_val)} kW/m)"
             else:
-                risk = f"Düşük Örtü Yangını ({int(byram_val)} kW/m)"
+                risk = f"{mod_etiket} ({int(byram_val)} kW/m)"
 
         saatlik_ozet.append({
             "saat": s,
             "alan_hektar": alan_ha,
             "yayilim_hizi_m_dk": ort_hiz,
-            "tepe_yangini_riski": risk,
-            "byram_siddeti_kw_m": byram_val,
-            "vpd_kpa": saatlik_vpd[idx]
+            "tepe_yangini_riski": risk
         })
 
     return {
