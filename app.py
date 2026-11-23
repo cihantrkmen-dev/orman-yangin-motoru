@@ -12,7 +12,7 @@ from motor import (
 
 app = FastAPI(
     title="Orman Yangını Davranış Analizi ve Simülasyon Motoru",
-    version="2.1.0"
+    version="3.0.0"
 )
 
 app.add_middleware(
@@ -33,12 +33,14 @@ class SimulasyonIstegi(BaseModel):
 def ana_sayfa():
     return {
         "durum": "aktif",
-        "motor": "Orman Yangını Davranış ve Simülasyon Motoru v2.1 (Kızılçam/Maki + Meşcere Yaş Sınıfı)",
-        "veri_kaynaklari": [
-            "Open-Meteo (10 Günlük Yağış & Güneş Radyasyonu + Canlı Hava)",
-            "Copernicus DEM (TPI Dere/Sırt + Eğim + Bakı + Deniz Maskesi)",
-            "Akdeniz-Ege Kızılçam/Maki Modeli + OSM",
-            "İsteğe Bağlı KML / GeoJSON Meşcere Katmanı"
+        "motor": "Orman Yangını Fizik Motoru v3.0 (Rothermel + Byram + Van Wagner + VPD)",
+        "denklemler": [
+            "Rothermel (1972) Yüzey Yayılım Denklemi",
+            "Byram (1959) Yangın Hattı Şiddeti (kW/m)",
+            "Van Wagner (1977) Tepe Yangını Geçiş Eşiği",
+            "Balch vd. (2022) Gece/Gündüz VPD Bariyeri",
+            "Viegas (2005) Dere/Kanyon Patlama Modeli",
+            "Albini (1979) Kozalak Sıçraması & McAlpine (1991) Nokta Hızlanma"
         ]
     }
 
@@ -57,7 +59,8 @@ def simule_et_endpoint(istek: SimulasyonIstegi):
             istek.boylam,
             dem["yari_cap"],
             istek.ozel_katman_icerik,
-            bitki["yakit_carpan_grid"]
+            bitki["yakit_carpan_grid"],
+            bitki["cbh_grid"]
         )
 
     simulasyon = yangin_simule_et(istek.enlem, istek.boylam, hava, dem, bitki)
@@ -69,11 +72,13 @@ def simule_et_endpoint(istek: SimulasyonIstegi):
                 "ort_sicaklik": hava["son_5_gun_ort_sicaklik"],
                 "ort_nem": hava["son_5_gun_ort_nem"],
                 "toplam_yagis_mm": hava["son_5_gun_yagis_mm"],
-                "olu_yakit_nemi_100saat": hava["olu_yakit_nemi_100saat"]
+                "olu_yakit_nemi_100saat": hava["olu_yakit_nemi_100saat"],
+                "canli_yaprak_nemi_lfmc": hava["canli_yaprak_nemi_lfmc"]
             },
             "anlik_hava": {
                 "sicaklik": hava["anlik_sicaklik"],
                 "nem": hava["anlik_nem"],
+                "vpd_kpa": hava["anlik_vpd_kpa"],
                 "ruzgar_hizi": hava["anlik_ruzgar_hizi"],
                 "ruzgar_yonu": hava["anlik_ruzgar_yonu"]
             },
