@@ -12,7 +12,7 @@ from motor import (
 
 app = FastAPI(
     title="Orman Yangını Davranış Analizi ve Simülasyon Motoru",
-    version="1.0.0"
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -33,12 +33,12 @@ class SimulasyonIstegi(BaseModel):
 def ana_sayfa():
     return {
         "durum": "aktif",
-        "motor": "Orman Yangını Davranış ve Simülasyon Motoru v1.0",
+        "motor": "Orman Yangını Davranış ve Simülasyon Motoru v2.1 (Kızılçam/Maki + Meşcere Yaş Sınıfı)",
         "veri_kaynaklari": [
-            "Open-Meteo (Son 5 Günlük + Anlık Hava)",
-            "Copernicus DEM (Arazi Eğimi ve Bakı)",
-            "OpenStreetMap + Akdeniz Ekolojik Katmanı",
-            "İsteğe Bağlı KML / GeoJSON Katmanı"
+            "Open-Meteo (10 Günlük Yağış & Güneş Radyasyonu + Canlı Hava)",
+            "Copernicus DEM (TPI Dere/Sırt + Eğim + Bakı + Deniz Maskesi)",
+            "Akdeniz-Ege Kızılçam/Maki Modeli + OSM",
+            "İsteğe Bağlı KML / GeoJSON Meşcere Katmanı"
         ]
     }
 
@@ -47,7 +47,7 @@ def ana_sayfa():
 def simule_et_endpoint(istek: SimulasyonIstegi):
     hava = hava_durumu_getir(istek.enlem, istek.boylam)
     dem = arazi_dem_getir(istek.enlem, istek.boylam)
-    bitki = bitki_ve_engeller_getir(istek.enlem, istek.boylam, dem["yukselti_grid"])
+    bitki = bitki_ve_engeller_getir(istek.enlem, istek.boylam, dem)
 
     ozel_nesne_sayisi = 0
     if istek.ozel_katman_icerik:
@@ -55,7 +55,9 @@ def simule_et_endpoint(istek: SimulasyonIstegi):
             bitki["yakit_grid"],
             istek.enlem,
             istek.boylam,
-            istek.ozel_katman_icerik
+            dem["yari_cap"],
+            istek.ozel_katman_icerik,
+            bitki["yakit_carpan_grid"]
         )
 
     simulasyon = yangin_simule_et(istek.enlem, istek.boylam, hava, dem, bitki)
