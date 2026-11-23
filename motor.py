@@ -84,13 +84,11 @@ def _saatlik_nem_adimi(
         fm100 = min(34.0, fm100 + min(4.5, 0.8 + yagis * 0.6))
         fm240 = min(40.0, fm240 + min(3.0, 0.5 + yagis * 0.4))
     elif not kuruma_mi:
-        # Islanma / nem geri kazanımı (adsorption)
         fm1 = emc + (fm1 - emc) * math.exp(-0.52)
         fm10 = emc + (fm10 - emc) * math.exp(-0.07)
         fm100 = emc + (fm100 - emc) * math.exp(-0.01)
         fm240 = emc + (fm240 - emc) * math.exp(-0.004)
     else:
-        # Kuruma fazı (desorption)
         radyasyon_carpan = 0.88 + (radyasyon / 900.0) * 0.50
         fm1 = emc + (fm1 - emc) * math.exp(-min(0.86, radyasyon_carpan))
         fm10 = emc + (fm10 - emc) * math.exp(-radyasyon_carpan / 10.0)
@@ -178,7 +176,6 @@ def hava_durumu_getir(enlem: float, boylam: float) -> dict:
         anlik_rh = round(float(anlik["relative_humidity_2m"]), 1)
         anlik_vpd = round(_buhar_basinci_acigi_vpd(anlik_t, anlik_rh), 2)
 
-        # Gelecek 12 saatin her biri için dinamik meteoroloji + evrilen yakıt nemi dizisi
         gelecek_12saat = []
         is_day_arr = saatlik.get("is_day", [])
         all_rad = saatlik.get("shortwave_radiation", [])
@@ -232,7 +229,6 @@ def hava_durumu_getir(enlem: float, boylam: float) -> dict:
             "kaynak": "Open-Meteo (Canlı + 12 Saatlik Dinamik Evrim)"
         }
 
-    # Yedek profilde dahi koordinatın astronomik gece/gündüz döngüsünü saatlik üret
     gelecek_12saat = []
     f1_s, f10_s, f100_s, f240_s = 11.5, 12.2, 13.0, 14.0
     for offset in range(12):
@@ -443,7 +439,6 @@ def bitki_ve_engeller_getir(enlem: float, boylam: float, dem: dict) -> dict:
     )
     yakit_carpan_grid = np.ones((boyut, boyut), dtype=float)
     cbh_grid = np.where(yakit_grid == 1, 2.2, np.where(yakit_grid == 2, 0.8, np.where(yakit_grid == 3, 5.5, 8.0)))
-    # Kapalılık: 3 = Tam Kapalı, 2 = Orta Kapalı, 1 = Gevşek, 0 = Açık Alan
     kapalilik_grid = np.where(yakit_grid == 1, 2, np.where(yakit_grid == 2, 3, np.where(yakit_grid == 3, 2, 0)))
 
     engel_sayisi = 0
@@ -545,7 +540,6 @@ def bitki_ve_engeller_getir(enlem: float, boylam: float, dem: dict) -> dict:
 
 
 def _mescere_rumuzu_coz(etiket_metni: str, varsayilan_poligon: bool = True) -> tuple[int, float, float, int]:
-    """Meşcere tipi, yaş sınıfı (a,b,c,d) ve kapalılık (1,2,3) -> (yakıt_sınıfı, hız_çarpanı, CBH_m, kapalilik)."""
     temiz = re.sub(r"<[^>]+>", " ", etiket_metni).lower()
 
     if any(k in temiz for k in ["yey", "emniyet", "orman yolu", "yol", "dere", "akarsu", "gölet", "baraj", "su", "kaya", "iskân", "iskan"]):
@@ -693,22 +687,17 @@ def _rothermel_hesapla(
     cos_ruzgar_aci: float, egim_tan: float, is_day: int,
     kapalilik: int, cbh_m: float, lfmc: float, vpd_kpa: float
 ) -> tuple[float, float, bool]:
-    """
-    Rothermel (1972) yüzey yayılımı + Albini & Baughman (1979) tepe kapalılığı rüzgar sönümlenmesi (WAF)
-    + Van Wagner (1977) tepe yangını geçişi.
-    """
     parametreler = {
-        1: (1.85, 5700.0, 16.0, 24.5),  # Kızılçam + Maki alt örtüsü
-        2: (1.60, 6200.0, 18.0, 23.5),  # Saf Maki ve Sık Çalılık
-        3: (1.35, 5100.0, 19.0, 25.0),  # Karaçam / Yüksek Rakım Ormanı
-        4: (0.65, 7800.0, 8.5, 21.0),   # Zeytinlik / Ot ve Tarım
+        1: (1.85, 5700.0, 16.0, 24.5),
+        2: (1.60, 6200.0, 18.0, 23.5),
+        3: (1.35, 5100.0, 19.0, 25.0),
+        4: (0.65, 7800.0, 8.5, 21.0),
     }
     w0, sigma, rho_b, mx = parametreler.get(yakit_sinif, (1.5, 5600.0, 16.0, 24.0))
 
     if mf_yuzde >= mx:
         return 0.0, 0.0, False
 
-    # Albini & Baughman (1979): Meşcere kapalılığına bağlı rüzgar sönümlenme katsayısı (WAF)
     waf_haritasi = {3: 0.24, 2: 0.38, 1: 0.54, 0: 0.68}
     waf = waf_haritasi.get(kapalilik, 0.38)
 
@@ -764,16 +753,95 @@ def _rothermel_hesapla(
 
     ros, byram_ib = _hiz_ve_siddet(waf)
 
-    # Van Wagner (1977) Tepe Yangını Geçiş Eşiği + Albini WAF=1.0 Açık Rüzgar Sıçraması
     tepe_aktif = False
     i0_kritik = (0.010 * cbh_m * (460.0 + 25.9 * lfmc)) ** 1.5
     if byram_ib >= i0_kritik and yakit_sinif in (1, 2, 3) and (is_day == 1 or vpd_kpa > 2.2):
         tepe_aktif = True
-        ros_tepe, byram_tepe = _hiz_ve_siddet(1.0)  # Ağaç tepesine çıkan alev 10m rüzgarının %100'ünü alır
+        ros_tepe, byram_tepe = _hiz_ve_siddet(1.0)
         ros = max(ros * 1.45, ros_tepe * 1.35)
         byram_ib = max(byram_ib * 1.6, byram_tepe * 1.4)
 
     return ros, byram_ib, tepe_aktif
+
+
+def _izgara_dis_konturlari(mask: np.ndarray, min_lat: float, max_lat: float, min_lon: float, max_lon: float) -> list[list[list[float]]]:
+    """
+    Yanmış hücre maskesinden gerçek arazi kıvrımlarını ve engelleri izleyen
+    kapalı dış sınır poligonlarını çıkarır ve Chaikin algoritması ile yumuşatır.
+    """
+    boyut = mask.shape[0]
+    padded = np.pad(mask, 1, mode="constant", constant_values=False)
+    adj: dict[tuple[int, int], list[tuple[tuple[int, int], int]]] = {}
+
+    def kenar_ekle(p1: tuple[int, int], p2: tuple[int, int], yon: int):
+        adj.setdefault(p1, []).append((p2, yon))
+
+    yanan_pr, yanan_pc = np.where(padded)
+    for pr, pc in zip(yanan_pr, yanan_pc):
+        x0, x1 = int(pc - 1), int(pc)
+        y0, y1 = int(pr - 1), int(pr)
+        if not padded[pr - 1, pc]:
+            kenar_ekle((x0, y0), (x1, y0), 0)
+        if not padded[pr, pc + 1]:
+            kenar_ekle((x1, y0), (x1, y1), 1)
+        if not padded[pr + 1, pc]:
+            kenar_ekle((x1, y1), (x0, y1), 2)
+        if not padded[pr, pc - 1]:
+            kenar_ekle((x0, y1), (x0, y0), 3)
+
+    kullanilan = set()
+    poligonlar = []
+
+    for baslangic_nokta, kenarlar in adj.items():
+        for hedef_nokta, ilk_yon in kenarlar:
+            if (baslangic_nokta, hedef_nokta) in kullanilan:
+                continue
+
+            halka = [baslangic_nokta]
+            kullanilan.add((baslangic_nokta, hedef_nokta))
+            mevcut = hedef_nokta
+            gelen_yon = ilk_yon
+
+            guvenlik = 0
+            while mevcut != baslangic_nokta and guvenlik < 20000:
+                guvenlik += 1
+                halka.append(mevcut)
+                adaylar = adj.get(mevcut, [])
+                tercih_sirasi = [(gelen_yon - 1) % 4, gelen_yon, (gelen_yon + 1) % 4, (gelen_yon + 2) % 4]
+                secilen = None
+                for tercih_yon in tercih_sirasi:
+                    for nxt, n_yon in adaylar:
+                        if n_yon == tercih_yon and (mevcut, nxt) not in kullanilan:
+                            secilen = (nxt, n_yon)
+                            break
+                    if secilen is not None:
+                        break
+                if secilen is None:
+                    break
+                kullanilan.add((mevcut, secilen[0]))
+                mevcut, gelen_yon = secilen
+
+            if len(halka) >= 4:
+                pts = [(float(x), float(y)) for x, y in halka]
+                for _ in range(2):
+                    yeni_pts = []
+                    n_p = len(pts)
+                    for i in range(n_p):
+                        p0 = pts[i]
+                        p1 = pts[(i + 1) % n_p]
+                        yeni_pts.append((0.75 * p0[0] + 0.25 * p1[0], 0.75 * p0[1] + 0.25 * p1[1]))
+                        yeni_pts.append((0.25 * p0[0] + 0.75 * p1[0], 0.25 * p0[1] + 0.75 * p1[1]))
+                    pts = yeni_pts
+
+                geo_halka = []
+                for x_val, y_val in pts:
+                    lo = round(min_lon + (x_val / boyut) * (max_lon - min_lon), 6)
+                    la = round(min_lat + (y_val / boyut) * (max_lat - min_lat), 6)
+                    geo_halka.append([lo, la])
+                geo_halka.append(geo_halka[0])
+                poligonlar.append(geo_halka)
+
+    return poligonlar
 
 
 def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: dict) -> dict:
@@ -811,6 +879,7 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
     saatlik_tepe_aktif = [False] * 12
     saatlik_durum_etiketi = [""] * 12
     kor_sicrama_sayaci = set()
+    en_erken_komsu_saati = 999.0
 
     kuyruk = [(0.0, merkez, merkez)]
     while kuyruk:
@@ -826,7 +895,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
         saat_vpd = saat_hava["vpd"]
         saat_fm = saat_hava["yakit_nemi"]
 
-        # Saatlik yağış varsa sönme kontrolü
         if saat_hava.get("yagis_mm", 0.0) >= 1.5 and saat_fm >= 23.5:
             saatlik_durum_etiketi[saat_indeks] = "Yağış Sönümlemesi"
             continue
@@ -839,7 +907,7 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
         egim_mag = math.hypot(gx, gy)
         egim_derece_yerel = math.degrees(math.atan(egim_mag))
 
-        # RYAN (1977) SIRT ARKASI PERDELEMESİ & SHARPLES (2012) GİRDAP KAYNAKLI YANAL YAYILIM (VLS)
+        # Ryan (1977) Sırt Arkası Perdelemesi & Sharples (2012) VLS Yanal Girdap
         yerel_sinoptik_hiz = sinoptik_hiz
         sirt_arkasi_aktif = False
         vls_girdap_aktif = False
@@ -851,12 +919,10 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
             yon_uyumu = ux * sx + uy * sy
 
             if yon_uyumu < -0.70 and egim_derece_yerel >= 18.0 and sinoptik_hiz >= 25.0:
-                # Sharples vd. (2012): Dik sırt arkasında şiddetli rüzgarda yamaç konturuna paralel yanal girdap
                 vls_girdap_aktif = True
                 kontur_x, kontur_y = -sy, sx
                 yerel_sinoptik_hiz = sinoptik_hiz * 0.72
             elif yon_uyumu < -0.10:
-                # Ryan (1977): Sırt arkası rüzgar perdelemesi (%45 - %78 azalma)
                 sirt_arkasi_aktif = True
                 kalkan = max(0.22, 1.0 - 3.2 * abs(yon_uyumu) * min(0.30, egim_mag))
                 if tpi[r, c] < -3.0:
@@ -869,7 +935,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
         wx = yerel_sinoptik_hiz * ux
         wy = yerel_sinoptik_hiz * uy
 
-        # Gündüz Anabatik (Eğim Yukarı) / Gece Katabatik (Eğim Aşağı) Termal Rüzgar
         egim_siddet = min(0.5, egim_mag)
         if is_day == 1:
             termal_hiz = 16.0 * egim_siddet * min(1.0, saat_hava["radyasyon"] / 500.0)
@@ -892,7 +957,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
         efektif_ruzgar_hiz = math.hypot(wx, wy)
         efektif_ruzgar_yon_deg = (math.degrees(math.atan2(wx, wy)) + 360.0) % 360.0
 
-        # Gece VPD ve Nem Geri Kazanımı Freni
         gece_nem_eklemesi = 0.0
         vpd_freni = 1.0
         if is_day == 0:
@@ -942,7 +1006,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
             if ros_yuzey <= 0.0:
                 continue
 
-            # VLS Yanal Girdap Yönelim Çarpanı (Kontur boyunca sağa-sola hızlanma)
             vls_carpan = 1.0
             if vls_girdap_aktif:
                 komsu_rad = math.radians(yon_azimut)
@@ -951,7 +1014,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
                 if kontur_uyumu > 0.65:
                     vls_carpan = 1.65
 
-            # Viegas (2005) Dar Dere / Vadi Baca Etkisi
             hedef_tpi = float(tpi[nr, nc])
             if is_day == 1 and hedef_tpi < -8.0 and egim_tan > 0.04:
                 topo_carpan = min(1.90, 1.0 + abs(hedef_tpi) / 28.0)
@@ -960,7 +1022,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
             else:
                 topo_carpan = 1.0
 
-            # Viegas vd. (2012) Alev Cephesi Birleşme Vakumu (Junction Fire Acceleration)
             yanan_komsu_sayisi = 0
             for kdr, kdc, _, _ in komsular:
                 kr, kc = nr + kdr, nc + kdc
@@ -971,13 +1032,22 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
             ros_etkin = ros_yuzey * float(carpan_grid[nr, nc]) * topo_carpan * vls_carpan * birlesme_carpan * vpd_freni
             byram_etkin = byram_ib * float(carpan_grid[nr, nc]) * topo_carpan * birlesme_carpan
 
-            if tepe_mi:
-                saatlik_tepe_aktif[saat_indeks] = True
+            yayilim_hizi_m_dk = max(0.08, ros_etkin)
+            gecis_saati = (mesafe / yayilim_hizi_m_dk) / 60.0
+            yeni_t = mevcut_t + gecis_saati
 
-            if byram_etkin > saatlik_max_byram[saat_indeks]:
-                saatlik_max_byram[saat_indeks] = byram_etkin
+            if r == merkez and c == merkez and yeni_t < en_erken_komsu_saati:
+                en_erken_komsu_saati = yeni_t
 
-            # Sardoy vd. (2007) / Albini (1979) Uzun Mesafeli Kozalak Sıçraması (200m - 900m)
+            # Geçiş süresi boyunca kaplanan tüm saat dilimlerine aktif cephe şiddetini işle
+            bitis_saat_idx = min(11, int(yeni_t))
+            for h_span in range(saat_indeks, bitis_saat_idx + 1):
+                if tepe_mi and h_span == saat_indeks:
+                    saatlik_tepe_aktif[h_span] = True
+                if byram_etkin > saatlik_max_byram[h_span]:
+                    saatlik_max_byram[h_span] = byram_etkin
+
+            # Sardoy vd. (2007) / Albini (1979) Uzun Mesafeli Kozalak Sıçraması
             if (
                 byram_etkin > 2200.0 and efektif_ruzgar_hiz >= 25.0
                 and hedef_yakit in (1, 2) and (r + c + saat_indeks) % 4 == 0
@@ -995,10 +1065,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
                         yanma_saati[sr, sc] = spot_t
                         heapq.heappush(kuyruk, (spot_t, sr, sc))
 
-            yayilim_hizi_m_dk = max(0.08, ros_etkin)
-            gecis_saati = (mesafe / yayilim_hizi_m_dk) / 60.0
-            yeni_t = mevcut_t + gecis_saati
-
             if yeni_t < yanma_saati[nr, nc] and yeni_t <= 12.0:
                 yanma_saati[nr, nc] = yeni_t
                 heapq.heappush(kuyruk, (yeni_t, nr, nc))
@@ -1007,72 +1073,70 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
     min_lon, max_lon = boylam - yari_cap, boylam + yari_cap
     hucre_hektar = (hucre_m * hucre_m) / 10000.0
 
-    def saat_poligonu_uret(hedef_saat: float) -> list:
-        yanan_r, yanan_c = np.where(yanma_saati <= hedef_saat)
-        if len(yanan_r) <= 1:
-            d = 0.00045
-            return [[
-                [round(boylam + d * math.cos(math.radians(a)), 5), round(enlem + d * math.sin(math.radians(a)), 5)]
-                for a in range(0, 361, 20)
-            ]]
-
-        sektor_sayisi = 36
-        max_uzaklik = np.full(sektor_sayisi, 0.00045)
-        for rr, cc in zip(yanan_r, yanan_c):
-            la = min_lat + (rr / (boyut - 1)) * (max_lat - min_lat)
-            lo = min_lon + (cc / (boyut - 1)) * (max_lon - min_lon)
-            dlat = la - enlem
-            dlon = lo - boylam
-            mes = math.hypot(dlat, dlon) + 0.00045
-            aci = (math.degrees(math.atan2(dlat, dlon)) + 360.0) % 360.0
-            sek = int(aci // 10) % sektor_sayisi
-            if mes > max_uzaklik[sek]:
-                max_uzaklik[sek] = mes
-
-        yumusak = np.copy(max_uzaklik)
-        for i in range(sektor_sayisi):
-            yumusak[i] = 0.25 * max_uzaklik[(i - 1) % sektor_sayisi] + 0.5 * max_uzaklik[i] + 0.25 * max_uzaklik[(i + 1) % sektor_sayisi]
-
-        halka = []
-        for i in range(sektor_sayisi):
-            rad = math.radians(i * 10 + 5)
-            lo = round(boylam + yumusak[i] * math.cos(rad), 5)
-            la = round(enlem + yumusak[i] * math.sin(rad), 5)
-            halka.append([lo, la])
-        halka.append(halka[0])
-        return [halka]
+    # 1. Saatten 12. Saate kadar HER SAAT için arazi kıvrımlarını izleyen poligon ve saatlik özet üretimi
+    saat_renkleri = {
+        1: "#B71C1C", 2: "#C62828", 3: "#D84315", 4: "#E64A19",
+        5: "#E65100", 6: "#EF6C00", 7: "#F57C00", 8: "#FB8C00",
+        9: "#FFA000", 10: "#FFB300", 11: "#FDD835", 12: "#FBC02D"
+    }
 
     izokronlar = []
-    renkler = {1: "#B71C1C", 3: "#E65100", 6: "#F57C00", 12: "#FBC02D"}
-    for s in [1, 3, 6, 12]:
-        yanan_hucre = int(np.sum(yanma_saati <= s))
-        alan_hektar = round(yanan_hucre * hucre_hektar, 1)
-        izokronlar.append({
-            "saat": s,
-            "renk": renkler[s],
-            "etkilenen_alan_hektar": alan_hektar,
-            "geometri": {
-                "type": "Polygon",
-                "coordinates": saat_poligonu_uret(float(s))
-            }
-        })
-
     saatlik_ozet = []
     onceki_alan_ha = 0.0
+    son_bilinen_byram = 45.0
+
     for s in range(1, 13):
         idx = s - 1
         sh = gelecek_12[idx]
-        yanan_hucre = int(np.sum(yanma_saati <= s))
-        alan_ha = round(yanan_hucre * hucre_hektar, 1)
-        byram_val = round(saatlik_max_byram[idx], 0)
+        yanan_mask = yanma_saati <= float(s)
+        yanan_hucre = int(np.sum(yanan_mask))
+        sonme_durumu = (sh["yakit_nemi"] >= 24.5) and (yanan_hucre <= 1)
 
-        if sh["yakit_nemi"] >= 24.5 or yanan_hucre <= 1:
+        if yanan_hucre <= 1:
+            # İlk hücre henüz dolmadan önce alt-hücre (sub-cell) kademeli büyüme ve dairesel cephe
+            ilerleme = 0.15 if sonme_durumu else min(0.95, max(0.18, float(s) / max(1.2, en_erken_komsu_saati)))
+            alan_ha = round(max(0.05, hucre_hektar * (ilerleme ** 2)), 2)
+            yaricap_deg = (yari_cap / boyut) * (0.35 + 0.65 * ilerleme)
+            halka = [
+                [
+                    round(boylam + yaricap_deg * math.cos(math.radians(a)), 6),
+                    round(enlem + yaricap_deg * math.sin(math.radians(a)), 6)
+                ]
+                for a in range(0, 361, 15)
+            ]
+            geometri = {"type": "Polygon", "coordinates": [halka]}
+        else:
+            alan_ha = round(yanan_hucre * hucre_hektar, 1)
+            konturlar = _izgara_dis_konturlari(yanan_mask, min_lat, max_lat, min_lon, max_lon)
+            if len(konturlar) == 1:
+                geometri = {"type": "Polygon", "coordinates": [konturlar[0]]}
+            elif len(konturlar) > 1:
+                geometri = {"type": "MultiPolygon", "coordinates": [[k] for k in konturlar]}
+            else:
+                d = 0.00035
+                halka = [[round(boylam + d * math.cos(math.radians(a)), 6), round(enlem + d * math.sin(math.radians(a)), 6)] for a in range(0, 361, 20)]
+                geometri = {"type": "Polygon", "coordinates": [halka]}
+
+        izokronlar.append({
+            "saat": s,
+            "renk": saat_renkleri[s],
+            "etkilenen_alan_hektar": alan_ha,
+            "geometri": geometri
+        })
+
+        byram_val = round(saatlik_max_byram[idx], 0)
+        if byram_val > 0:
+            son_bilinen_byram = byram_val
+        elif not sonme_durumu:
+            byram_val = son_bilinen_byram
+
+        if sonme_durumu:
             anlik_hiz = 0.0
-            risk = "Yok (Sönme Eşiği)"
+            risk = "Sönme Eşiği (Yakıt Islak)"
         else:
             r_onceki = math.sqrt((onceki_alan_ha * 10000.0) / math.pi)
             r_simdi = math.sqrt((alan_ha * 10000.0) / math.pi)
-            anlik_hiz = round(max(0.0, (r_simdi - r_onceki) / 60.0), 1)
+            anlik_hiz = round(max(0.1, (r_simdi - r_onceki) / 60.0), 1)
             mod_etiket = saatlik_durum_etiketi[idx] or ("Gündüz" if sh["is_day"] == 1 else "Gece")
             if saatlik_tepe_aktif[idx]:
                 risk = f"Tepe Yangını ({int(byram_val)} kW/m)"
