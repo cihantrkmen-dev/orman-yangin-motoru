@@ -23,7 +23,7 @@ def _denge_nemi_emc(yakit_sicaklik_c: float, yakit_bagil_nem: float) -> float:
     return max(2.0, min(35.0, emc))
 
 
-# 1. SON 10 GÜNLÜK YAĞIŞ + GÜNEŞLENME + ANLIK VE 12 SAATLİK HAVA DURUMU
+# 1. SON 10 GÜNLÜK YAĞIŞ + GÜNEŞLENME + GECE NEM GERİ KAZANIMI
 def hava_durumu_getir(enlem: float, boylam: float) -> dict:
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -59,30 +59,46 @@ def hava_durumu_getir(enlem: float, boylam: float) -> dict:
         et0_arr = saatlik.get("et0_fao_evapotranspiration", [0.15] * gecmis_saat)[:gecmis_saat]
         w_arr = saatlik["wind_speed_10m"][:gecmis_saat]
 
-        fm1, fm10, fm100, fm240 = 14.0, 15.0, 16.0, 18.0
+        fm1, fm10, fm100, fm240 = 16.0, 17.0, 18.0, 19.0
 
         for i in range(gecmis_saat):
-            t_air = float(t_arr[i] or 18.0)
-            rh_air = float(rh_arr[i] or 50.0)
+            t_air = float(t_arr[i] or 15.0)
+            rh_air = float(rh_arr[i] or 55.0)
             yagis = float(p_arr[i] or 0.0)
             radyasyon = float(rad_arr[i] or 0.0)
             et0 = float(et0_arr[i] or 0.0)
             ruzgar = float(w_arr[i] or 10.0)
 
-            t_fuel = t_air + (0.024 * radyasyon) / (1.0 + 0.12 * ruzgar)
+            # Gündüz güneş ısınması, gece radyatif soğuma ve çiğ nemi
+            if radyasyon > 40.0:
+                t_fuel = t_air + (0.018 * radyasyon) / (1.0 + 0.14 * ruzgar)
+            else:
+                t_fuel = t_air - 0.8
+
             es_air = _doymus_buhar_basinci(t_air)
             es_fuel = _doymus_buhar_basinci(t_fuel)
-            rh_fuel = rh_air * (es_air / max(0.1, es_fuel))
+            rh_fuel = min(98.0, rh_air * (es_air / max(0.1, es_fuel)))
             emc = _denge_nemi_emc(t_fuel, rh_fuel)
 
+            # Yüksek bağıl nemde (çiğ / sis) ek yüzey nemi kazanımı
+            if rh_air >= 72.0 and radyasyon < 80.0:
+                emc = min(32.0, emc + (rh_air - 70.0) * 0.16)
+
             if yagis > 0.1:
-                fm1 = min(45.0, fm1 + min(18.0, 4.5 + yagis * 3.2))
-                fm10 = min(40.0, fm10 + min(10.0, 2.0 + yagis * 1.6))
-                fm100 = min(36.0, fm100 + min(5.0, 0.8 + yagis * 0.65))
-                fm240 = min(45.0, fm240 + min(3.5, 0.5 + yagis * 0.45))
+                fm1 = min(45.0, fm1 + min(18.0, 5.0 + yagis * 3.5))
+                fm10 = min(40.0, fm10 + min(10.0, 2.2 + yagis * 1.7))
+                fm100 = min(36.0, fm100 + min(5.0, 0.9 + yagis * 0.7))
+                fm240 = min(45.0, fm240 + min(3.5, 0.6 + yagis * 0.5))
+            elif emc > fm1:
+                # Nem geri kazanımı (adsorption)
+                fm1 = emc + (fm1 - emc) * math.exp(-0.65)
+                fm10 = emc + (fm10 - emc) * math.exp(-0.08)
+                fm100 = emc + (fm100 - emc) * math.exp(-0.01)
+                fm240 = emc + (fm240 - emc) * math.exp(-0.004)
             else:
-                radyasyon_carpan = 1.0 + (radyasyon / 900.0) * 0.45 + (et0 * 0.4)
-                fm1 = emc + (fm1 - emc) * math.exp(-min(0.95, radyasyon_carpan))
+                # Kuruma fazı (desorption)
+                radyasyon_carpan = 0.85 + (radyasyon / 1000.0) * 0.45 + (et0 * 0.35)
+                fm1 = emc + (fm1 - emc) * math.exp(-min(0.85, radyasyon_carpan))
                 fm10 = emc + (fm10 - emc) * math.exp(-radyasyon_carpan / 10.0)
                 fm100 = emc + (fm100 - emc) * math.exp(-radyasyon_carpan / 100.0)
                 fm240 = emc + (fm240 - emc) * math.exp(-radyasyon_carpan / 240.0)
@@ -115,7 +131,7 @@ def hava_durumu_getir(enlem: float, boylam: float) -> dict:
             "olu_yakit_nemi_100saat": bilesik_yakit_nemi,
             "gelecek_12saat_ruzgar_hiz": gelecek_ruzgar_hiz,
             "gelecek_12saat_ruzgar_yon": gelecek_ruzgar_yon,
-            "kaynak": "Open-Meteo (10 Günlük Yağış & Güneş Radyasyonu + Canlı)"
+            "kaynak": "Open-Meteo (10 Günlük Yağış, Güneşlenme & Çiğ Dengesi)"
         }
     except Exception:
         return {
@@ -212,7 +228,6 @@ def _cizgi_izgaraya_isle(grid: np.ndarray, r0: int, c0: int, r1: int, c1: int, d
 
 
 def _poligon_icini_doldur(grid: np.ndarray, halka: list[tuple[int, int]], deger: int, carpan_grid: np.ndarray, carpan: float):
-    """Kapalı meşcere poligonunun hem sınırlarını hem de tüm iç hücrelerini doldurur."""
     if len(halka) < 3:
         return
     for idx in range(len(halka) - 1):
@@ -250,12 +265,6 @@ def bitki_ve_engeller_getir(enlem: float, boylam: float, dem: dict) -> dict:
     min_lat, max_lat = enlem - yari_cap, enlem + yari_cap
     min_lon, max_lon = boylam - yari_cap, boylam + yari_cap
 
-    # Yakıt sınıfları:
-    # 1 = Kızılçam + Maki Alt Örtülü Orman (Akdeniz-Ege 0-950m baskın)
-    # 2 = Saf Maki ve Sık Çalılık (Kıyı ve güney bakılı kurak yamaçlar)
-    # 3 = Karaçam / Karışık Orman (950m üzeri yüksek kesimler)
-    # 4 = Zeytinlik / Tarım ve Açıklık
-    # 0 = Su / Kıyı / Yol / Yanmaz Engel
     guney_yamac = (baki_grid >= 110.0) & (baki_grid <= 250.0)
     yakit_grid = np.where(
         elev_grid <= 1.0, 0,
@@ -355,17 +364,11 @@ def bitki_ve_engeller_getir(enlem: float, boylam: float, dem: dict) -> dict:
 
 
 def _mescere_rumuzu_coz(etiket_metni: str, varsayilan_poligon: bool = True) -> tuple[int, float, str]:
-    """
-    KML/GeoJSON içindeki meşcere tipi, gelişme çağı (yaş sınıfı: a, b, c, d) ve kapalılık (1, 2, 3)
-    bilgilerini okuyarak yakıt sınıfını ve hız çarpanını döndürür.
-    """
     temiz = re.sub(r"<[^>]+>", " ", etiket_metni).lower()
 
-    # 1. Yol / Yangın Emniyet Yolu / Dere / Su / Kayalık
     if any(k in temiz for k in ["yey", "emniyet", "orman yolu", "yol", "dere", "akarsu", "gölet", "baraj", "su", "kaya", "iskân", "iskan"]):
         return 0, 0.0, "Engel/Yol"
 
-    # 2. Meşcere Rumuzu Eşleştirme (Örn: Çza3, Çzbc2, Çzd3, M, Mb, Çkb2, OT, Z)
     eslesme = re.search(r"\b(çz|cz|çk|ck|mb|md|m|bçz|bçk|kz|kn|me|z|ot|a|t)([abcd]{1,2})?([0123])?\b", temiz)
     if eslesme:
         tur = eslesme.group(1)
@@ -373,31 +376,29 @@ def _mescere_rumuzu_coz(etiket_metni: str, varsayilan_poligon: bool = True) -> t
         kapalilik = eslesme.group(3) or ""
 
         if tur in ("çz", "cz", "bçz", "kz"):
-            sinif = 1  # Kızılçam
+            sinif = 1
         elif tur in ("m", "mb", "md"):
-            sinif = 2  # Maki
+            sinif = 2
         elif tur in ("çk", "ck", "bçk", "kn", "me"):
-            sinif = 3  # Karaçam / Geniş Yapraklı
+            sinif = 3
         else:
-            sinif = 4  # Zeytinlik / Açıklık / Ziraat
+            sinif = 4
 
-        # Yaş sınıfı / Gelişme çağı katsayısı
         if "a" in cag and "b" not in cag:
-            cag_carpan = 1.35  # Gençlik / Sıklık çağı (en hızlı ve tepeye açık)
+            cag_carpan = 1.35
         elif "a" in cag and "b" in cag:
             cag_carpan = 1.28
         elif "b" in cag and "c" not in cag:
-            cag_carpan = 1.20  # Sırıklık çağı
+            cag_carpan = 1.20
         elif "b" in cag and "c" in cag:
             cag_carpan = 1.10
         elif "c" in cag and "d" not in cag:
-            cag_carpan = 1.00  # Direklik çağı
+            cag_carpan = 1.00
         elif "d" in cag:
-            cag_carpan = 0.85  # Ağaçlık / Yaşlı orman
+            cag_carpan = 0.85
         else:
             cag_carpan = 0.85 if tur == "mb" else 1.00
 
-        # Kapalılık katsayısı (1, 2, 3)
         if kapalilik == "3":
             kap_carpan = 1.15
         elif kapalilik == "1":
@@ -410,7 +411,6 @@ def _mescere_rumuzu_coz(etiket_metni: str, varsayilan_poligon: bool = True) -> t
         kod_ozet = f"{tur.upper()}{cag}{kapalilik}"
         return sinif, round(cag_carpan * kap_carpan, 2), kod_ozet
 
-    # 3. Açık metin kelimeleri
     if "maki" in temiz or "çalı" in temiz or "cali" in temiz:
         return 2, 1.0, "Maki"
     if "gençlik" in temiz or "sıklık" in temiz:
@@ -468,7 +468,6 @@ def ozel_katman_uygula(yakit_grid: np.ndarray, enlem: float, boylam: float, yari
             if not pm.tag.endswith("Placemark"):
                 continue
 
-            # Placemark içindeki name, description ve ExtendedData metinlerini birleştir
             etiket_parcalari = []
             for alt in pm.iter():
                 if alt.tag.endswith(("name", "description", "value", "SimpleData")) and alt.text:
@@ -513,19 +512,18 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
     anlik_sicaklik = hava["anlik_sicaklik"]
     radyasyon_ort = hava.get("son_10_gun_ort_radyasyon_wm2", 400.0)
 
-    sonme_nemi = 24.0
+    # SÖNME NEMİ KONTROLÜ (Moisture of Extinction Mx = %23.5)
+    sonme_nemi = 23.5
     if fm_bilesik >= sonme_nemi:
         nem_katsayisi = 0.0
     else:
         nem_orani = fm_bilesik / sonme_nemi
-        nem_katsayisi = float(np.clip(1.65 * ((1.0 - nem_orani) ** 1.35), 0.04, 1.65))
+        nem_katsayisi = float(np.clip(1.65 * ((1.0 - nem_orani) ** 1.65), 0.02, 1.65))
 
-    if anlik_sicaklik < 14.0:
-        sicaklik_freni = float(np.clip(0.35 + (anlik_sicaklik / 22.0), 0.25, 1.0))
+    if anlik_sicaklik < 15.0:
+        sicaklik_freni = float(np.clip(0.30 + (anlik_sicaklik / 24.0), 0.22, 1.0))
         nem_katsayisi *= sicaklik_freni
 
-    # Akdeniz-Ege kalibrasyonlu temel yayılım hızları (m/dk):
-    # 1: Kızılçam + Maki (16.0), 2: Saf Maki (13.5), 3: Karaçam/Karışık (9.0), 4: Zeytin/Tarım (5.5)
     temel_hiz = {0: 0.0, 1: 16.0, 2: 13.5, 3: 9.0, 4: 5.5}
 
     yanma_saati = np.full((boyut, boyut), 999.0)
@@ -564,7 +562,6 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
                 if hedef_yakit == 0:
                     if elev[nr, nc] <= 1.0:
                         continue
-                    # Kızılçam kozalak atlama (spotting): şiddetli rüzgar ve kuru yakıtta yol/dere atlama
                     if ruzgar_hiz >= 32.0 and fm_bilesik < 11.5 and int(yakit[r, c]) in (1, 2):
                         r0 = 2.1
                     else:
@@ -592,7 +589,7 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
                 gunes_faktoru = min(1.0, radyasyon_ort / 600.0)
                 baki_etkisi = 1.0 - 0.22 * math.cos(baki_rad) * gunes_faktoru
 
-                yayilim_hizi_m_dk = max(0.2, r0 * nem_katsayisi * ruzgar_etkisi * egim_etkisi * topo_etkisi * baki_etkisi)
+                yayilim_hizi_m_dk = max(0.15, r0 * nem_katsayisi * ruzgar_etkisi * egim_etkisi * topo_etkisi * baki_etkisi)
                 gecis_saati = (mesafe / yayilim_hizi_m_dk) / 60.0
                 yeni_t = mevcut_t + gecis_saati
 
@@ -667,7 +664,7 @@ def yangin_simule_et(enlem: float, boylam: float, hava: dict, dem: dict, bitki: 
             if fm_bilesik < 11.5 and hava["anlik_ruzgar_hizi"] > 20.0 and anlik_sicaklik >= 22.0:
                 risk = "Yüksek (Tepe Yangını Riski)"
             elif fm_bilesik < 17.5:
-                risk = "Orta (Kızılçam/Maki Örtü Yangını)"
+                risk = "Orta (Örtü Yangını)"
             else:
                 risk = "Düşük (Yavaş Örtü Yangını)"
 
